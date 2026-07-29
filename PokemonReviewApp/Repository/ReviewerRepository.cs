@@ -1,5 +1,4 @@
-﻿using AutoMapper;
-using Microsoft.EntityFrameworkCore;
+﻿using Microsoft.EntityFrameworkCore;
 using PokemonReviewApp.Data;
 using PokemonReviewApp.Interfaces;
 using PokemonReviewApp.Models;
@@ -9,12 +8,10 @@ namespace PokemonReviewApp.Repository
     public class ReviewerRepository : IReviewerRepository
     {
         private readonly DataContext _context;
-        private readonly IMapper _mapper;
 
-        public ReviewerRepository(DataContext context, IMapper mapper)
+        public ReviewerRepository(DataContext context)
         {
             _context = context;
-            _mapper = mapper;
         }
 
         public bool CreateReviewer(Reviewer reviewer)

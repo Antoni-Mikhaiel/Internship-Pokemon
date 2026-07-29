@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using PokemonReviewApp;
 using PokemonReviewApp.Data;
 using PokemonReviewApp.Interfaces;
+using PokemonReviewApp.Middleware;
 using PokemonReviewApp.Repository;
 using System.Text.Json.Serialization;
 
@@ -9,7 +10,6 @@ var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
 
-builder.Services.AddControllers();
 builder.Services.AddTransient<Seed>();
 builder.Services.AddControllers().AddJsonOptions(x =>
                 x.JsonSerializerOptions.ReferenceHandler = ReferenceHandler.IgnoreCycles);
@@ -25,7 +25,7 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddDbContext<DataContext>(options =>
 {
-    options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection"));
+    options.UseSqlite(builder.Configuration.GetConnectionString("DefaultConnection"));
 });
 
 var app = builder.Build();
@@ -44,17 +44,24 @@ void SeedData(IHost app)
     }
 }
 
-
-
-
 // Configure the HTTP request pipeline.
+
+// First in the pipeline: everything downstream is wrapped by it.
+app.UseGlobalExceptionHandling();
+
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
     app.UseSwaggerUI();
 }
 
-app.UseHttpsRedirection();
+// Swagger UI is served over plain HTTP in development. Redirecting its "Try it out"
+// calls to the HTTPS port makes them fail with a TLS error, because the ASP.NET dev
+// certificate is untrusted here and a background fetch gets no chance to prompt.
+if (!app.Environment.IsDevelopment())
+{
+    app.UseHttpsRedirection();
+}
 
 app.UseAuthorization();
 
