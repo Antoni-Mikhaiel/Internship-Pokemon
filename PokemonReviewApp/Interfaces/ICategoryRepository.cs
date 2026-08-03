@@ -1,16 +1,14 @@
-﻿using PokemonReviewApp.Models;
+using PokemonReviewApp.Models;
 
 namespace PokemonReviewApp.Interfaces
 {
-    public interface ICategoryRepository
+    public interface ICategoryRepository : IGenericRepository<Category>
     {
-        ICollection<Category> GetCategories();
-        Category GetCategory(int id);
-        ICollection<Pokemon> GetPokemonByCategory(int categoryId);
-        bool CategoryExists(int id);
-        bool CreateCategory(Category category);
-        bool UpdateCategory(Category category);
-        bool DeleteCategory(Category category);
-        bool Save();
+        Task<IReadOnlyList<Pokemon>> GetPokemonByCategoryAsync(
+            int categoryId,
+            CancellationToken cancellationToken = default);
+
+        /// <summary>Case- and whitespace-insensitive lookup used to reject duplicates.</summary>
+        Task<Category?> GetByNameAsync(string name, CancellationToken cancellationToken = default);
     }
 }

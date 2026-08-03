@@ -1,147 +1,131 @@
-﻿using AutoMapper;
+using AutoMapper;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using PokemonReviewApp.Common;
 using PokemonReviewApp.Dto;
 using PokemonReviewApp.Interfaces;
 using PokemonReviewApp.Models;
 
 namespace PokemonReviewApp.Controllers
 {
-    [Route("api/[controller]")]
-    [ApiController]
-    public class CountryController : Controller
+    [Authorize]
+    public class CountryController : ApiControllerBase
     {
-        private readonly ICountryRepository _countryRepository;
+        private readonly IUnitOfWork _unitOfWork;
         private readonly IMapper _mapper;
 
-        public CountryController(ICountryRepository countryRepository, IMapper mapper)
+        public CountryController(IUnitOfWork unitOfWork, IMapper mapper)
         {
-            _countryRepository = countryRepository;
+            _unitOfWork = unitOfWork;
             _mapper = mapper;
         }
 
         [HttpGet]
-        [ProducesResponseType(200, Type = typeof(IEnumerable<Country>))]
-        public IActionResult GetCountries()
+        [AllowAnonymous]
+        [ProducesResponseType(typeof(IEnumerable<CountryDto>), StatusCodes.Status200OK)]
+        public async Task<IActionResult> GetCountries(CancellationToken cancellationToken)
         {
-            var countries = _mapper.Map<List<CountryDto>>(_countryRepository.GetCountries());
+            var countries = await _unitOfWork.Countries.GetAllAsync(cancellationToken: cancellationToken);
 
-            if (!ModelState.IsValid)
-                return BadRequest(ModelState);
-
-            return Ok(countries);
+            return Ok(_mapper.Map<List<CountryDto>>(countries));
         }
 
-        [HttpGet("{countryId}")]
-        [ProducesResponseType(200, Type = typeof(Country))]
-        [ProducesResponseType(400)]
-        public IActionResult GetCountry(int countryId)
+        [HttpGet("{countryId:int}")]
+        [AllowAnonymous]
+        [ProducesResponseType(typeof(CountryDto), StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        public async Task<IActionResult> GetCountry(int countryId, CancellationToken cancellationToken)
         {
-            if (!_countryRepository.CountryExists(countryId))
-                return NotFound();
+            var result = Result
+                .Create(
+                    await _unitOfWork.Countries.GetByIdAsync(countryId, cancellationToken),
+                    DomainErrors.Country.NotFound(countryId))
+                .Map(_mapper.Map<CountryDto>);
 
-            var country = _mapper.Map<CountryDto>(_countryRepository.GetCountry(countryId));
-
-            if (!ModelState.IsValid)
-                return BadRequest(ModelState);
-
-            return Ok(country);
+            return ToActionResult(result);
         }
 
-        [HttpGet("/owners/{ownerId}")]
-        [ProducesResponseType(400)]
-        [ProducesResponseType(200, Type = typeof(Country))]
-        public IActionResult GetCountryOfAnOwner(int ownerId)
+        [HttpGet("owners/{ownerId:int}")]
+        [AllowAnonymous]
+        [ProducesResponseType(typeof(CountryDto), StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        public async Task<IActionResult> GetCountryOfAnOwner(int ownerId, CancellationToken cancellationToken)
         {
-            var country = _mapper.Map<CountryDto>(
-                _countryRepository.GetCountryByOwner(ownerId));
+            if (!await _unitOfWork.Owners.ExistsAsync(ownerId, cancellationToken))
+                return Problem(DomainErrors.Owner.NotFound(ownerId));
 
-            if (!ModelState.IsValid)
-                return BadRequest();
+            var result = Result
+                .Create(
+                    await _unitOfWork.Countries.GetByOwnerAsync(ownerId, cancellationToken),
+                    DomainErrors.Country.NotFound(ownerId))
+                .Map(_mapper.Map<CountryDto>);
 
-            return Ok(country);
+            return ToActionResult(result);
         }
 
         [HttpPost]
-        [ProducesResponseType(204)]
-        [ProducesResponseType(400)]
-        public IActionResult CreateCountry([FromBody] CountryDto countryCreate)
+        [ProducesResponseType(typeof(CountryDto), StatusCodes.Status201Created)]
+        [ProducesResponseType(StatusCodes.Status400BadRequest)]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(StatusCodes.Status409Conflict)]
+        public async Task<IActionResult> CreateCountry(
+            [FromBody] CountryDto request,
+            CancellationToken cancellationToken)
         {
-            if (countryCreate == null)
-                return BadRequest(ModelState);
+            if (await _unitOfWork.Countries.GetByNameAsync(request.Name, cancellationToken) is not null)
+                return Problem(DomainErrors.Country.DuplicateName(request.Name));
 
-            var country = _countryRepository.GetCountries()
-                .Where(c => c.Name.Trim().ToUpper() == countryCreate.Name.TrimEnd().ToUpper())
-                .FirstOrDefault();
+            var country = _mapper.Map<Country>(request);
 
-            if (country != null)
-            {
-                ModelState.AddModelError("", "Country already exists");
-                return StatusCode(422, ModelState);
-            }
+            await _unitOfWork.Countries.AddAsync(country, cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-            if (!ModelState.IsValid)
-                return BadRequest(ModelState);
+            var created = _mapper.Map<CountryDto>(country);
 
-            var countryMap = _mapper.Map<Country>(countryCreate);
-
-            if (!_countryRepository.CreateCountry(countryMap))
-            {
-                ModelState.AddModelError("", "Something went wrong while savin");
-                return StatusCode(500, ModelState);
-            }
-
-            return Ok("Successfully created");
+            return CreatedAtAction(nameof(GetCountry), new { countryId = created.Id }, created);
         }
 
-        [HttpPut("{countryId}")]
-        [ProducesResponseType(400)]
-        [ProducesResponseType(204)]
-        [ProducesResponseType(404)]
-        public IActionResult UpdateCategory(int countryId, [FromBody] CountryDto updatedCountry)
+        [HttpPut("{countryId:int}")]
+        [ProducesResponseType(StatusCodes.Status204NoContent)]
+        [ProducesResponseType(StatusCodes.Status400BadRequest)]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        public async Task<IActionResult> UpdateCountry(
+            int countryId,
+            [FromBody] CountryDto request,
+            CancellationToken cancellationToken)
         {
-            if (updatedCountry == null)
-                return BadRequest(ModelState);
+            if (countryId != request.Id)
+                return Problem(DomainErrors.General.IdMismatch(nameof(countryId)));
 
-            if (countryId != updatedCountry.Id)
-                return BadRequest(ModelState);
+            var country = await _unitOfWork.Countries.GetByIdAsync(countryId, cancellationToken);
 
-            if (!_countryRepository.CountryExists(countryId))
-                return NotFound();
+            if (country is null)
+                return Problem(DomainErrors.Country.NotFound(countryId));
 
-            if (!ModelState.IsValid)
-                return BadRequest();
+            _mapper.Map(request, country);
 
-            var countryMap = _mapper.Map<Country>(updatedCountry);
-
-            if (!_countryRepository.UpdateCountry(countryMap))
-            {
-                ModelState.AddModelError("", "Something went wrong updating category");
-                return StatusCode(500, ModelState);
-            }
+            _unitOfWork.Countries.Update(country);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
 
             return NoContent();
         }
 
-        [HttpDelete("{countryId}")]
-        [ProducesResponseType(400)]
-        [ProducesResponseType(204)]
-        [ProducesResponseType(404)]
-        public IActionResult DeleteCountry(int countryId)
+        [HttpDelete("{countryId:int}")]
+        [Authorize(Roles = AppRoles.Admin)]
+        [ProducesResponseType(StatusCodes.Status204NoContent)]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(StatusCodes.Status403Forbidden)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        public async Task<IActionResult> DeleteCountry(int countryId, CancellationToken cancellationToken)
         {
-            if (!_countryRepository.CountryExists(countryId))
-            {
-                return NotFound();
-            }
+            var country = await _unitOfWork.Countries.GetByIdAsync(countryId, cancellationToken);
 
-            var countryToDelete = _countryRepository.GetCountry(countryId);
+            if (country is null)
+                return Problem(DomainErrors.Country.NotFound(countryId));
 
-            if (!ModelState.IsValid)
-                return BadRequest(ModelState);
-
-            if (!_countryRepository.DeleteCountry(countryToDelete))
-            {
-                ModelState.AddModelError("", "Something went wrong deleting category");
-            }
+            _unitOfWork.Countries.Remove(country);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
 
             return NoContent();
         }

@@ -1,158 +1,136 @@
-﻿using AutoMapper;
+using AutoMapper;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using PokemonReviewApp.Common;
 using PokemonReviewApp.Dto;
 using PokemonReviewApp.Interfaces;
 using PokemonReviewApp.Models;
 
 namespace PokemonReviewApp.Controllers
 {
-    [Route("api/[controller]")]
-    [ApiController]
-    public class OwnerController : Controller
+    [Authorize]
+    public class OwnerController : ApiControllerBase
     {
-        private readonly IOwnerRepository _ownerRepository;
-        private readonly ICountryRepository _countryRepository;
+        private readonly IUnitOfWork _unitOfWork;
         private readonly IMapper _mapper;
 
-        public OwnerController(IOwnerRepository ownerRepository, 
-            ICountryRepository countryRepository,
-            IMapper mapper)
+        public OwnerController(IUnitOfWork unitOfWork, IMapper mapper)
         {
-            _ownerRepository = ownerRepository;
-            _countryRepository = countryRepository;
+            _unitOfWork = unitOfWork;
             _mapper = mapper;
         }
 
         [HttpGet]
-        [ProducesResponseType(200, Type = typeof(IEnumerable<Owner>))]
-        public IActionResult GetOwners()
+        [AllowAnonymous]
+        [ProducesResponseType(typeof(IEnumerable<OwnerDto>), StatusCodes.Status200OK)]
+        public async Task<IActionResult> GetOwners(CancellationToken cancellationToken)
         {
-            var owners = _mapper.Map<List<OwnerDto>>(_ownerRepository.GetOwners());
+            var owners = await _unitOfWork.Owners.GetAllAsync(cancellationToken: cancellationToken);
 
-            if (!ModelState.IsValid)
-                return BadRequest(ModelState);
-
-            return Ok(owners);
+            return Ok(_mapper.Map<List<OwnerDto>>(owners));
         }
 
-        [HttpGet("{ownerId}")]
-        [ProducesResponseType(200, Type = typeof(Owner))]
-        [ProducesResponseType(400)]
-        public IActionResult GetOwner(int ownerId)
+        [HttpGet("{ownerId:int}")]
+        [AllowAnonymous]
+        [ProducesResponseType(typeof(OwnerDto), StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        public async Task<IActionResult> GetOwner(int ownerId, CancellationToken cancellationToken)
         {
-            if (!_ownerRepository.OwnerExists(ownerId))
-                return NotFound();
+            var result = Result
+                .Create(
+                    await _unitOfWork.Owners.GetByIdAsync(ownerId, cancellationToken),
+                    DomainErrors.Owner.NotFound(ownerId))
+                .Map(_mapper.Map<OwnerDto>);
 
-            var owner = _mapper.Map<OwnerDto>(_ownerRepository.GetOwner(ownerId));
-
-            if (!ModelState.IsValid)
-                return BadRequest(ModelState);
-
-            return Ok(owner);
+            return ToActionResult(result);
         }
 
-        [HttpGet("{ownerId}/pokemon")]
-        [ProducesResponseType(200, Type = typeof(Owner))]
-        [ProducesResponseType(400)]
-        public IActionResult GetPokemonByOwner(int ownerId)
+        [HttpGet("{ownerId:int}/pokemon")]
+        [AllowAnonymous]
+        [ProducesResponseType(typeof(IEnumerable<PokemonDto>), StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        public async Task<IActionResult> GetPokemonByOwner(int ownerId, CancellationToken cancellationToken)
         {
-            if (!_ownerRepository.OwnerExists(ownerId))
-            {
-                return NotFound();
-            }
+            if (!await _unitOfWork.Owners.ExistsAsync(ownerId, cancellationToken))
+                return Problem(DomainErrors.Owner.NotFound(ownerId));
 
-            var owner = _mapper.Map<List<PokemonDto>>(
-                _ownerRepository.GetPokemonByOwner(ownerId));
+            var pokemon = await _unitOfWork.Owners.GetPokemonByOwnerAsync(ownerId, cancellationToken);
 
-            if (!ModelState.IsValid)
-                return BadRequest(ModelState);
-
-            return Ok(owner);
+            return Ok(_mapper.Map<List<PokemonDto>>(pokemon));
         }
 
         [HttpPost]
-        [ProducesResponseType(204)]
-        [ProducesResponseType(400)]
-        public IActionResult CreateOwner([FromQuery] int countryId, [FromBody] OwnerDto ownerCreate)
+        [ProducesResponseType(typeof(OwnerDto), StatusCodes.Status201Created)]
+        [ProducesResponseType(StatusCodes.Status400BadRequest)]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(StatusCodes.Status409Conflict)]
+        public async Task<IActionResult> CreateOwner(
+            [FromQuery] int countryId,
+            [FromBody] OwnerDto request,
+            CancellationToken cancellationToken)
         {
-            if (ownerCreate == null)
-                return BadRequest(ModelState);
+            if (await _unitOfWork.Owners.GetByLastNameAsync(request.LastName, cancellationToken) is not null)
+                return Problem(DomainErrors.Owner.DuplicateName(request.LastName));
 
-            var owners = _ownerRepository.GetOwners()
-                .Where(c => c.LastName.Trim().ToUpper() == ownerCreate.LastName.TrimEnd().ToUpper())
-                .FirstOrDefault();
+            // The country has to be a tracked entity, not the no-tracking copy the read
+            // helpers return, or EF would try to insert a second row for it.
+            var country = await _unitOfWork.Countries.GetByIdAsync(countryId, cancellationToken);
 
-            if (owners != null)
-            {
-                ModelState.AddModelError("", "Owner already exists");
-                return StatusCode(422, ModelState);
-            }
+            if (country is null)
+                return Problem(DomainErrors.Country.NotFound(countryId));
 
-            if (!ModelState.IsValid)
-                return BadRequest(ModelState);
+            var owner = _mapper.Map<Owner>(request);
+            owner.Country = country;
 
-            var ownerMap = _mapper.Map<Owner>(ownerCreate);
+            await _unitOfWork.Owners.AddAsync(owner, cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-            ownerMap.Country = _countryRepository.GetCountry(countryId);
+            var created = _mapper.Map<OwnerDto>(owner);
 
-            if (!_ownerRepository.CreateOwner(ownerMap))
-            {
-                ModelState.AddModelError("", "Something went wrong while savin");
-                return StatusCode(500, ModelState);
-            }
-
-            return Ok("Successfully created");
+            return CreatedAtAction(nameof(GetOwner), new { ownerId = created.Id }, created);
         }
 
-        [HttpPut("{ownerId}")]
-        [ProducesResponseType(400)]
-        [ProducesResponseType(204)]
-        [ProducesResponseType(404)]
-        public IActionResult UpdateOwner(int ownerId, [FromBody] OwnerDto updatedOwner)
+        [HttpPut("{ownerId:int}")]
+        [ProducesResponseType(StatusCodes.Status204NoContent)]
+        [ProducesResponseType(StatusCodes.Status400BadRequest)]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        public async Task<IActionResult> UpdateOwner(
+            int ownerId,
+            [FromBody] OwnerDto request,
+            CancellationToken cancellationToken)
         {
-            if (updatedOwner == null)
-                return BadRequest(ModelState);
+            if (ownerId != request.Id)
+                return Problem(DomainErrors.General.IdMismatch(nameof(ownerId)));
 
-            if (ownerId != updatedOwner.Id)
-                return BadRequest(ModelState);
+            var owner = await _unitOfWork.Owners.GetByIdAsync(ownerId, cancellationToken);
 
-            if (!_ownerRepository.OwnerExists(ownerId))
-                return NotFound();
+            if (owner is null)
+                return Problem(DomainErrors.Owner.NotFound(ownerId));
 
-            if (!ModelState.IsValid)
-                return BadRequest();
+            _mapper.Map(request, owner);
 
-            var ownerMap = _mapper.Map<Owner>(updatedOwner);
-
-            if (!_ownerRepository.UpdateOwner(ownerMap))
-            {
-                ModelState.AddModelError("", "Something went wrong updating owner");
-                return StatusCode(500, ModelState);
-            }
+            _unitOfWork.Owners.Update(owner);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
 
             return NoContent();
         }
 
-        [HttpDelete("{ownerId}")]
-        [ProducesResponseType(400)]
-        [ProducesResponseType(204)]
-        [ProducesResponseType(404)]
-        public IActionResult DeleteOwner(int ownerId)
+        [HttpDelete("{ownerId:int}")]
+        [Authorize(Roles = AppRoles.Admin)]
+        [ProducesResponseType(StatusCodes.Status204NoContent)]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(StatusCodes.Status403Forbidden)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        public async Task<IActionResult> DeleteOwner(int ownerId, CancellationToken cancellationToken)
         {
-            if (!_ownerRepository.OwnerExists(ownerId))
-            {
-                return NotFound();
-            }
+            var owner = await _unitOfWork.Owners.GetByIdAsync(ownerId, cancellationToken);
 
-            var ownerToDelete = _ownerRepository.GetOwner(ownerId);
+            if (owner is null)
+                return Problem(DomainErrors.Owner.NotFound(ownerId));
 
-            if (!ModelState.IsValid)
-                return BadRequest(ModelState);
-
-            if (!_ownerRepository.DeleteOwner(ownerToDelete))
-            {
-                ModelState.AddModelError("", "Something went wrong deleting owner");
-            }
+            _unitOfWork.Owners.Remove(owner);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
 
             return NoContent();
         }

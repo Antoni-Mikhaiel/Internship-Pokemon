@@ -1,83 +1,123 @@
-﻿using FluentAssertions;
+using System.Linq;
+using System.Threading.Tasks;
+using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
-using PokemonReviewApp.Data;
 using PokemonReviewApp.Models;
 using PokemonReviewApp.Repository;
-using System;
-using System.Collections.Generic;
-using System.Threading.Tasks;
+using PokemonReviewApp.Tests.TestSupport;
 using Xunit;
 
 namespace PokemonReviewApp.Tests.Repository
 {
     public class PokemonRepositoryTests
     {
-
-        private async Task<DataContext> GetDatabaseContext()
-        {
-            var options = new DbContextOptionsBuilder<DataContext>()
-                .UseInMemoryDatabase(databaseName: Guid.NewGuid().ToString())
-                .Options;
-            var databaseContext = new DataContext(options);
-            databaseContext.Database.EnsureCreated();
-            if (await databaseContext.Pokemon.CountAsync() <= 0)
-            {
-                for (int i = 1; i <= 10; i++)
-                {
-                    databaseContext.Pokemon.Add(
-                    new Pokemon()
-                    {
-                        Name = "Pikachu",
-                        BirthDate = new DateTime(1903, 1, 1),
-                        PokemonCategories = new List<PokemonCategory>()
-                            {
-                                new PokemonCategory { Category = new Category() { Name = "Electric"}}
-                            },
-                        Reviews = new List<Review>()
-                            {
-                                new Review { Title="Pikachu",Text = "Pickahu is the best pokemon, because it is electric", Rating = 5,
-                                Reviewer = new Reviewer(){ FirstName = "Teddy", LastName = "Smith" } },
-                                new Review { Title="Pikachu", Text = "Pickachu is the best a killing rocks", Rating = 5,
-                                Reviewer = new Reviewer(){ FirstName = "Taylor", LastName = "Jones" } },
-                                new Review { Title="Pikachu",Text = "Pickchu, pickachu, pikachu", Rating = 1,
-                                Reviewer = new Reviewer(){ FirstName = "Jessica", LastName = "McGregor" } },
-                            }
-                    });
-                    await databaseContext.SaveChangesAsync();
-                }
-            }
-            return databaseContext;
-        }
         [Fact]
-        public async void PokemonRepository_GetPokemon_ReturnsPokemon()
+        public async Task GetByNameAsync_ReturnsPokemon()
         {
-            //Arrange
-            var name = "Pikachu";
-            var dbContext = await GetDatabaseContext();
-            var pokemonRepository = new PokemonRepository(dbContext);
+            var dbContext = await TestDatabase.CreateAsync();
+            var repository = new PokemonRepository(dbContext);
 
-            //Act
-            var result = pokemonRepository.GetPokemon(name);
+            var result = await repository.GetByNameAsync("Pikachu");
 
-            //Assert
             result.Should().NotBeNull();
             result.Should().BeOfType<Pokemon>();
         }
 
         [Fact]
-        public async void PokemonRepository_GetPokemonRating_ReturnDecimalBetweenOneAndTen()
+        public async Task GetByNameAsync_IgnoresCaseAndSurroundingWhitespace()
         {
-            //Arrange
-            var pokeId = 1;
-            var dbContext = await GetDatabaseContext();
-            var pokemonRepository = new PokemonRepository(dbContext);
+            var dbContext = await TestDatabase.CreateAsync();
+            var repository = new PokemonRepository(dbContext);
 
-            //Act
-            var result = pokemonRepository.GetPokemonRating(pokeId);
+            var result = await repository.GetByNameAsync("  pIkAcHu  ");
 
-            //Assert
-            result.Should().NotBe(0);
-            result.Should().BeInRange(1, 10);
+            result.Should().NotBeNull();
+            result!.Name.Should().Be("Pikachu");
+        }
+
+        [Fact]
+        public async Task GetByNameAsync_ReturnsNullWhenNothingMatches()
+        {
+            var dbContext = await TestDatabase.CreateAsync();
+            var repository = new PokemonRepository(dbContext);
+
+            var result = await repository.GetByNameAsync("Snorlax");
+
+            result.Should().BeNull();
+        }
+
+        [Fact]
+        public async Task GetRatingAsync_ReturnsAverageOfReviewRatings()
+        {
+            var dbContext = await TestDatabase.CreateAsync();
+            var repository = new PokemonRepository(dbContext);
+            var pokemonId = await dbContext.Pokemon.Select(p => p.Id).FirstAsync();
+
+            var result = await repository.GetRatingAsync(pokemonId);
+
+            // Ratings are 5, 5 and 2 — the decimal cast is what keeps this off an integer 4.
+            result.Should().Be(4m);
+        }
+
+        [Fact]
+        public async Task GetRatingAsync_ReturnsZeroWhenThereAreNoReviews()
+        {
+            var dbContext = await TestDatabase.CreateAsync(seed: false);
+            var repository = new PokemonRepository(dbContext);
+
+            dbContext.Pokemon.Add(new Pokemon { Name = "Ditto" });
+            await dbContext.SaveChangesAsync();
+
+            var pokemonId = await dbContext.Pokemon.Select(p => p.Id).FirstAsync();
+
+            var result = await repository.GetRatingAsync(pokemonId);
+
+            result.Should().Be(0m);
+        }
+
+        [Fact]
+        public async Task GetAllAsync_ReturnsEveryPokemonOrderedById()
+        {
+            var dbContext = await TestDatabase.CreateAsync();
+            var repository = new PokemonRepository(dbContext);
+
+            var result = await repository.GetAllAsync();
+
+            result.Should().HaveCount(10);
+            result.Select(p => p.Id).Should().BeInAscendingOrder();
+        }
+
+        [Fact]
+        public async Task AddWithOwnerAndCategoryAsync_StagesPokemonAndBothJoinRows()
+        {
+            var dbContext = await TestDatabase.CreateAsync(seed: false);
+            var repository = new PokemonRepository(dbContext);
+
+            var owner = new Owner
+            {
+                FirstName = "Ash",
+                LastName = "Ketchum",
+                Gym = "Pallet",
+                Country = new Country { Name = "Kanto" }
+            };
+            var category = new Category { Name = "Electric" };
+
+            dbContext.Owners.Add(owner);
+            dbContext.Categories.Add(category);
+            await dbContext.SaveChangesAsync();
+
+            var pokemon = new Pokemon { Name = "Pikachu" };
+
+            await repository.AddWithOwnerAndCategoryAsync(pokemon, owner.Id, category.Id);
+
+            // Nothing is persisted until the caller saves — that is the unit of work's job.
+            (await dbContext.Pokemon.CountAsync()).Should().Be(0);
+
+            await dbContext.SaveChangesAsync();
+
+            (await dbContext.Pokemon.CountAsync()).Should().Be(1);
+            (await dbContext.PokemonOwners.CountAsync()).Should().Be(1);
+            (await dbContext.PokemonCategories.CountAsync()).Should().Be(1);
         }
     }
 }

@@ -1,61 +1,41 @@
-﻿using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore;
 using PokemonReviewApp.Data;
 using PokemonReviewApp.Interfaces;
 using PokemonReviewApp.Models;
 
 namespace PokemonReviewApp.Repository
 {
-    public class ReviewerRepository : IReviewerRepository
+    public class ReviewerRepository : GenericRepository<Reviewer>, IReviewerRepository
     {
-        private readonly DataContext _context;
-
-        public ReviewerRepository(DataContext context)
+        public ReviewerRepository(DataContext context) : base(context)
         {
-            _context = context;
         }
 
-        public bool CreateReviewer(Reviewer reviewer)
+        public Task<Reviewer?> GetWithReviewsAsync(int reviewerId, CancellationToken cancellationToken = default) =>
+            DbSet
+                .AsNoTracking()
+                .Include(r => r.Reviews)
+                .FirstOrDefaultAsync(r => r.Id == reviewerId, cancellationToken);
+
+        public async Task<IReadOnlyList<Review>> GetReviewsByReviewerAsync(
+            int reviewerId,
+            bool tracked = false,
+            CancellationToken cancellationToken = default)
         {
-            _context.Add(reviewer);
-            return Save();
+            var reviews = tracked ? Context.Reviews : Context.Reviews.AsNoTracking();
+
+            return await reviews
+                .Where(r => r.Reviewer.Id == reviewerId)
+                .ToListAsync(cancellationToken);
         }
 
-        public bool DeleteReviewer(Reviewer reviewer)
+        public Task<Reviewer?> GetByLastNameAsync(string lastName, CancellationToken cancellationToken = default)
         {
-            _context.Remove(reviewer);
-            return Save();
-        }
+            var normalized = lastName.Trim().ToUpper();
 
-        public Reviewer GetReviewer(int reviewerId)
-        {
-            return _context.Reviewers.Where(r => r.Id == reviewerId).Include(e => e.Reviews).FirstOrDefault();
-        }
-
-        public ICollection<Reviewer> GetReviewers()
-        {
-            return _context.Reviewers.ToList();
-        }
-
-        public ICollection<Review> GetReviewsByReviewer(int reviewerId)
-        {
-            return _context.Reviews.Where(r => r.Reviewer.Id == reviewerId).ToList();
-        }
-
-        public bool ReviewerExists(int reviewerId)
-        {
-            return _context.Reviewers.Any(r => r.Id == reviewerId);
-        }
-
-        public bool Save()
-        {
-            var saved = _context.SaveChanges();
-            return saved > 0 ? true : false;
-        }
-
-        public bool UpdateReviewer(Reviewer reviewer)
-        {
-            _context.Update(reviewer);
-            return Save();
+            return DbSet
+                .AsNoTracking()
+                .FirstOrDefaultAsync(r => r.LastName.Trim().ToUpper() == normalized, cancellationToken);
         }
     }
 }
