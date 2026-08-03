@@ -1,9 +1,17 @@
-﻿using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore;
 using PokemonReviewApp.Models;
 
 namespace PokemonReviewApp.Data
 {
-    public class DataContext : DbContext
+    /// <summary>
+    /// The application's single <see cref="DbContext"/>. It derives from
+    /// <see cref="IdentityDbContext{TUser,TRole,TKey}"/> so Identity's user, role and claim
+    /// tables live in the same database — and therefore the same transaction — as the domain
+    /// tables, instead of needing a second context and a second commit.
+    /// </summary>
+    public class DataContext : IdentityDbContext<AppUser, IdentityRole, string>
     {
         public DataContext(DbContextOptions<DataContext> options) : base(options)
         {
@@ -21,6 +29,9 @@ namespace PokemonReviewApp.Data
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
+            // Identity configures its own tables here; skipping this call would drop them.
+            base.OnModelCreating(modelBuilder);
+
             modelBuilder.Entity<PokemonCategory>()
                     .HasKey(pc => new { pc.PokemonId, pc.CategoryId });
             modelBuilder.Entity<PokemonCategory>()

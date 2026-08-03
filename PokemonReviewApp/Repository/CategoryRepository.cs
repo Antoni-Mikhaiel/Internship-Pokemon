@@ -1,58 +1,32 @@
-﻿using PokemonReviewApp.Data;
+using Microsoft.EntityFrameworkCore;
+using PokemonReviewApp.Data;
 using PokemonReviewApp.Interfaces;
 using PokemonReviewApp.Models;
 
 namespace PokemonReviewApp.Repository
 {
-    public class CategoryRepository : ICategoryRepository
+    public class CategoryRepository : GenericRepository<Category>, ICategoryRepository
     {
-        private DataContext _context;
-        public CategoryRepository(DataContext context)
+        public CategoryRepository(DataContext context) : base(context)
         {
-            _context = context;
-        }
-        public bool CategoryExists(int id)
-        {
-            return _context.Categories.Any(c => c.Id == id);
         }
 
-        public bool CreateCategory(Category category)
-        {
-            _context.Add(category);
-            return Save();
-        }
+        public async Task<IReadOnlyList<Pokemon>> GetPokemonByCategoryAsync(
+            int categoryId,
+            CancellationToken cancellationToken = default) =>
+            await Context.PokemonCategories
+                .AsNoTracking()
+                .Where(pc => pc.CategoryId == categoryId)
+                .Select(pc => pc.Pokemon)
+                .ToListAsync(cancellationToken);
 
-        public bool DeleteCategory(Category category)
+        public Task<Category?> GetByNameAsync(string name, CancellationToken cancellationToken = default)
         {
-            _context.Remove(category);
-            return Save();
-        }
+            var normalized = name.Trim().ToUpper();
 
-        public ICollection<Category> GetCategories()
-        {
-            return _context.Categories.ToList();
-        }
-
-        public Category GetCategory(int id)
-        {
-            return _context.Categories.Where(e => e.Id == id).FirstOrDefault();
-        }
-
-        public ICollection<Pokemon> GetPokemonByCategory(int categoryId)
-        {
-            return _context.PokemonCategories.Where(e => e.CategoryId == categoryId).Select(c => c.Pokemon).ToList();
-        }
-
-        public bool Save()
-        {
-            var saved = _context.SaveChanges();
-            return saved > 0 ? true : false;
-        }
-
-        public bool UpdateCategory(Category category)
-        {
-            _context.Update(category);
-            return Save();
+            return DbSet
+                .AsNoTracking()
+                .FirstOrDefaultAsync(c => c.Name.Trim().ToUpper() == normalized, cancellationToken);
         }
     }
 }

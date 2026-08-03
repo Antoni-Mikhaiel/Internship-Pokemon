@@ -2,6 +2,7 @@ using System.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Infrastructure;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.IdentityModel.Tokens;
 
 namespace PokemonReviewApp.Middleware
 {
@@ -10,6 +11,12 @@ namespace PokemonReviewApp.Middleware
     /// RFC 7807 problem+json response, so the API never leaks a stack trace and
     /// never answers with an unmapped status code.
     /// </summary>
+    /// <remarks>
+    /// This is the net under the Result pattern, not a replacement for it. Expected
+    /// failures — a missing category, a duplicate name — come back as a
+    /// <see cref="Common.Result"/> and never reach here; what lands here is the
+    /// genuinely unforeseen, and it is logged as such.
+    /// </remarks>
     public class GlobalExceptionHandlingMiddleware
     {
         private readonly RequestDelegate _next;
@@ -95,10 +102,17 @@ namespace PokemonReviewApp.Middleware
                 cancellationToken: context.RequestAborted);
         }
 
+        // Ordering matters: the compiler matches these top to bottom, so every derived type
+        // has to sit above its base (DbUpdateConcurrencyException before DbUpdateException,
+        // ArgumentNullException before ArgumentException).
         private static (int StatusCode, string Title) MapToResponse(Exception exception) => exception switch
         {
             KeyNotFoundException => (StatusCodes.Status404NotFound, "Resource not found."),
             UnauthorizedAccessException => (StatusCodes.Status403Forbidden, "Access denied."),
+            // A rejected or expired bearer token. The description is deliberately vague:
+            // telling a caller exactly why validation failed helps an attacker more than it
+            // helps a client.
+            SecurityTokenException => (StatusCodes.Status401Unauthorized, "The access token is not valid."),
             ArgumentException => (StatusCodes.Status400BadRequest, "The request was not valid."),
             NotImplementedException => (StatusCodes.Status501NotImplemented, "This operation is not implemented."),
             DbUpdateConcurrencyException => (StatusCodes.Status409Conflict,

@@ -1,151 +1,133 @@
-﻿using AutoMapper;
+using AutoMapper;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using PokemonReviewApp.Common;
 using PokemonReviewApp.Dto;
 using PokemonReviewApp.Interfaces;
 using PokemonReviewApp.Models;
 
 namespace PokemonReviewApp.Controllers
 {
-    [Route("api/[controller]")]
-    [ApiController]
-    public class CategoryController : Controller
+    // Reading the catalogue is open to anyone; changing it needs a token, and deleting
+    // needs an administrator. Each action opts out of this default explicitly.
+    [Authorize]
+    public class CategoryController : ApiControllerBase
     {
-        private readonly ICategoryRepository _categoryRepository;
+        private readonly IUnitOfWork _unitOfWork;
         private readonly IMapper _mapper;
 
-        public CategoryController(ICategoryRepository categoryRepository, IMapper mapper)
+        public CategoryController(IUnitOfWork unitOfWork, IMapper mapper)
         {
-            _categoryRepository = categoryRepository;
+            _unitOfWork = unitOfWork;
             _mapper = mapper;
         }
 
         [HttpGet]
-        [ProducesResponseType(200, Type = typeof(IEnumerable<Category>))]
-        public IActionResult GetCategories()
+        [AllowAnonymous]
+        [ProducesResponseType(typeof(IEnumerable<CategoryDto>), StatusCodes.Status200OK)]
+        public async Task<IActionResult> GetCategories(CancellationToken cancellationToken)
         {
-            var categories = _mapper.Map<List<CategoryDto>>(_categoryRepository.GetCategories());
+            var categories = await _unitOfWork.Categories.GetAllAsync(cancellationToken: cancellationToken);
 
-            if (!ModelState.IsValid)
-                return BadRequest(ModelState);
-
-            return Ok(categories);
+            return Ok(_mapper.Map<List<CategoryDto>>(categories));
         }
 
-        [HttpGet("{categoryId}")]
-        [ProducesResponseType(200, Type = typeof(Category))]
-        [ProducesResponseType(400)]
-        public IActionResult GetCategory(int categoryId)
+        [HttpGet("{categoryId:int}")]
+        [AllowAnonymous]
+        [ProducesResponseType(typeof(CategoryDto), StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        public async Task<IActionResult> GetCategory(int categoryId, CancellationToken cancellationToken)
         {
-            if (!_categoryRepository.CategoryExists(categoryId))
-                return NotFound();
+            var result = Result
+                .Create(
+                    await _unitOfWork.Categories.GetByIdAsync(categoryId, cancellationToken),
+                    DomainErrors.Category.NotFound(categoryId))
+                .Map(_mapper.Map<CategoryDto>);
 
-            var category = _mapper.Map<CategoryDto>(_categoryRepository.GetCategory(categoryId));
-
-            if (!ModelState.IsValid)
-                return BadRequest(ModelState);
-
-            return Ok(category);
+            return ToActionResult(result);
         }
 
-        [HttpGet("pokemon/{categoryId}")]
-        [ProducesResponseType(200, Type = typeof(IEnumerable<Pokemon>))]
-        [ProducesResponseType(400)]
-        public IActionResult GetPokemonByCategoryId(int categoryId)
+        [HttpGet("{categoryId:int}/pokemon")]
+        [AllowAnonymous]
+        [ProducesResponseType(typeof(IEnumerable<PokemonDto>), StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        public async Task<IActionResult> GetPokemonByCategory(int categoryId, CancellationToken cancellationToken)
         {
-            var pokemons = _mapper.Map<List<PokemonDto>>(
-                _categoryRepository.GetPokemonByCategory(categoryId));
+            if (!await _unitOfWork.Categories.ExistsAsync(categoryId, cancellationToken))
+                return Problem(DomainErrors.Category.NotFound(categoryId));
 
-            if (!ModelState.IsValid)
-                return BadRequest();
+            var pokemon = await _unitOfWork.Categories.GetPokemonByCategoryAsync(categoryId, cancellationToken);
 
-            return Ok(pokemons);
+            return Ok(_mapper.Map<List<PokemonDto>>(pokemon));
         }
 
         [HttpPost]
-        [ProducesResponseType(204)]
-        [ProducesResponseType(400)]
-        public IActionResult CreateCategory([FromBody] CategoryDto categoryCreate)
+        [ProducesResponseType(typeof(CategoryDto), StatusCodes.Status201Created)]
+        [ProducesResponseType(StatusCodes.Status400BadRequest)]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(StatusCodes.Status409Conflict)]
+        public async Task<IActionResult> CreateCategory(
+            [FromBody] CategoryDto request,
+            CancellationToken cancellationToken)
         {
-            if (categoryCreate == null)
-                return BadRequest(ModelState);
+            if (await _unitOfWork.Categories.GetByNameAsync(request.Name, cancellationToken) is not null)
+                return Problem(DomainErrors.Category.DuplicateName(request.Name));
 
-            var category = _categoryRepository.GetCategories()
-                .Where(c => c.Name.Trim().ToUpper() == categoryCreate.Name.TrimEnd().ToUpper())
-                .FirstOrDefault();
+            var category = _mapper.Map<Category>(request);
 
-            if(category != null)
-            {
-                ModelState.AddModelError("", "Category already exists");
-                return StatusCode(422, ModelState);
-            }
+            await _unitOfWork.Categories.AddAsync(category, cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-            if (!ModelState.IsValid)
-                return BadRequest(ModelState);
+            var created = _mapper.Map<CategoryDto>(category);
 
-            var categoryMap = _mapper.Map<Category>(categoryCreate);
-
-            if(!_categoryRepository.CreateCategory(categoryMap))
-            {
-                ModelState.AddModelError("", "Something went wrong while savin");
-                return StatusCode(500, ModelState);
-            }
-
-            return Ok("Successfully created");
+            return CreatedAtAction(nameof(GetCategory), new { categoryId = created.Id }, created);
         }
 
-        [HttpPut("{categoryId}")]
-        [ProducesResponseType(400)]
-        [ProducesResponseType(204)]
-        [ProducesResponseType(404)]
-        public IActionResult UpdateCategory(int categoryId, [FromBody]CategoryDto updatedCategory)
+        [HttpPut("{categoryId:int}")]
+        [ProducesResponseType(StatusCodes.Status204NoContent)]
+        [ProducesResponseType(StatusCodes.Status400BadRequest)]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        public async Task<IActionResult> UpdateCategory(
+            int categoryId,
+            [FromBody] CategoryDto request,
+            CancellationToken cancellationToken)
         {
-            if (updatedCategory == null)
-                return BadRequest(ModelState);
+            if (categoryId != request.Id)
+                return Problem(DomainErrors.General.IdMismatch(nameof(categoryId)));
 
-            if (categoryId != updatedCategory.Id)
-                return BadRequest(ModelState);
+            var category = await _unitOfWork.Categories.GetByIdAsync(categoryId, cancellationToken);
 
-            if (!_categoryRepository.CategoryExists(categoryId))
-                return NotFound();
+            if (category is null)
+                return Problem(DomainErrors.Category.NotFound(categoryId));
 
-            if (!ModelState.IsValid)
-                return BadRequest();
+            // Map onto the tracked entity rather than attaching a fresh one, so columns the
+            // DTO does not carry keep their current values instead of being nulled out.
+            _mapper.Map(request, category);
 
-            var categoryMap = _mapper.Map<Category>(updatedCategory);
-
-            if(!_categoryRepository.UpdateCategory(categoryMap))
-            {
-                ModelState.AddModelError("", "Something went wrong updating category");
-                return StatusCode(500, ModelState);
-            }
+            _unitOfWork.Categories.Update(category);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
 
             return NoContent();
         }
 
-        [HttpDelete("{categoryId}")]
-        [ProducesResponseType(400)]
-        [ProducesResponseType(204)]
-        [ProducesResponseType(404)]
-        public IActionResult DeleteCategory(int categoryId)
+        [HttpDelete("{categoryId:int}")]
+        [Authorize(Roles = AppRoles.Admin)]
+        [ProducesResponseType(StatusCodes.Status204NoContent)]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(StatusCodes.Status403Forbidden)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        public async Task<IActionResult> DeleteCategory(int categoryId, CancellationToken cancellationToken)
         {
-            if(!_categoryRepository.CategoryExists(categoryId))
-            {
-                return NotFound();
-            }
+            var category = await _unitOfWork.Categories.GetByIdAsync(categoryId, cancellationToken);
 
-            var categoryToDelete = _categoryRepository.GetCategory(categoryId);
+            if (category is null)
+                return Problem(DomainErrors.Category.NotFound(categoryId));
 
-            if (!ModelState.IsValid)
-                return BadRequest(ModelState);
-
-            if(!_categoryRepository.DeleteCategory(categoryToDelete))
-            {
-                ModelState.AddModelError("", "Something went wrong deleting category");
-            }
+            _unitOfWork.Categories.Remove(category);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
 
             return NoContent();
         }
-
-
     }
 }
