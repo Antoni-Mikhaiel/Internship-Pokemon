@@ -1,16 +1,14 @@
-﻿using PokemonReviewApp.Models;
+using PokemonReviewApp.Models;
 
 namespace PokemonReviewApp.Interfaces
 {
-    public interface IOwnerRepository
+    public interface IOwnerRepository : IGenericRepository<Owner>
     {
-        ICollection<Owner> GetOwners();
-        Owner GetOwner(int ownerId);
-        ICollection<Pokemon> GetPokemonByOwner(int ownerId);
-        bool OwnerExists(int ownerId);
-        bool CreateOwner(Owner owner);
-        bool UpdateOwner(Owner owner);
-        bool DeleteOwner(Owner owner);
-        bool Save();
+        Task<IReadOnlyList<Pokemon>> GetPokemonByOwnerAsync(
+            int ownerId,
+            CancellationToken cancellationToken = default);
+
+        /// <summary>Case- and whitespace-insensitive lookup used to reject duplicates.</summary>
+        Task<Owner?> GetByLastNameAsync(string lastName, CancellationToken cancellationToken = default);
     }
 }

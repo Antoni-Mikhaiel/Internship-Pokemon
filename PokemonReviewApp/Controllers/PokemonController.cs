@@ -1,160 +1,142 @@
-﻿using AutoMapper;
+using AutoMapper;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using PokemonReviewApp.Common;
 using PokemonReviewApp.Dto;
 using PokemonReviewApp.Interfaces;
 using PokemonReviewApp.Models;
 
 namespace PokemonReviewApp.Controllers
 {
-    [Route("api/[controller]")]
-    [ApiController]
-    public class PokemonController : Controller
+    [Authorize]
+    public class PokemonController : ApiControllerBase
     {
-        private readonly IPokemonRepository _pokemonRepository;
-        private readonly IReviewRepository _reviewRepository;
+        private readonly IUnitOfWork _unitOfWork;
         private readonly IMapper _mapper;
 
-        public PokemonController(IPokemonRepository pokemonRepository,
-            IReviewRepository reviewRepository,
-            IMapper mapper)
+        public PokemonController(IUnitOfWork unitOfWork, IMapper mapper)
         {
-            _pokemonRepository = pokemonRepository;
-            _reviewRepository = reviewRepository;
+            _unitOfWork = unitOfWork;
             _mapper = mapper;
         }
 
         [HttpGet]
-        [ProducesResponseType(200, Type = typeof(IEnumerable<Pokemon>))]
-        public IActionResult GetPokemons()
+        [AllowAnonymous]
+        [ProducesResponseType(typeof(IEnumerable<PokemonDto>), StatusCodes.Status200OK)]
+        public async Task<IActionResult> GetPokemons(CancellationToken cancellationToken)
         {
-            var pokemons = _mapper.Map<List<PokemonDto>>(_pokemonRepository.GetPokemons());
+            var pokemon = await _unitOfWork.Pokemon.GetAllAsync(cancellationToken: cancellationToken);
 
-            if (!ModelState.IsValid)
-                return BadRequest(ModelState);
-
-            return Ok(pokemons);
+            return Ok(_mapper.Map<List<PokemonDto>>(pokemon));
         }
 
-        [HttpGet("{pokeId}")]
-        [ProducesResponseType(200, Type = typeof(Pokemon))]
-        [ProducesResponseType(400)]
-        public IActionResult GetPokemon(int pokeId)
+        [HttpGet("{pokeId:int}")]
+        [AllowAnonymous]
+        [ProducesResponseType(typeof(PokemonDto), StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        public async Task<IActionResult> GetPokemon(int pokeId, CancellationToken cancellationToken)
         {
-            if (!_pokemonRepository.PokemonExists(pokeId))
-                return NotFound();
+            var result = Result
+                .Create(
+                    await _unitOfWork.Pokemon.GetByIdAsync(pokeId, cancellationToken),
+                    DomainErrors.Pokemon.NotFound(pokeId))
+                .Map(_mapper.Map<PokemonDto>);
 
-            var pokemon = _mapper.Map<PokemonDto>(_pokemonRepository.GetPokemon(pokeId));
-
-            if (!ModelState.IsValid)
-                return BadRequest(ModelState);
-
-            return Ok(pokemon);
+            return ToActionResult(result);
         }
 
-        [HttpGet("{pokeId}/rating")]
-        [ProducesResponseType(200, Type = typeof(decimal))]
-        [ProducesResponseType(400)]
-        public IActionResult GetPokemonRating(int pokeId)
+        [HttpGet("{pokeId:int}/rating")]
+        [AllowAnonymous]
+        [ProducesResponseType(typeof(decimal), StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        public async Task<IActionResult> GetPokemonRating(int pokeId, CancellationToken cancellationToken)
         {
-            if (!_pokemonRepository.PokemonExists(pokeId))
-                return NotFound();
+            if (!await _unitOfWork.Pokemon.ExistsAsync(pokeId, cancellationToken))
+                return Problem(DomainErrors.Pokemon.NotFound(pokeId));
 
-            var rating = _pokemonRepository.GetPokemonRating(pokeId);
-
-            if (!ModelState.IsValid)
-                return BadRequest();
-
-            return Ok(rating);
+            return Ok(await _unitOfWork.Pokemon.GetRatingAsync(pokeId, cancellationToken));
         }
 
         [HttpPost]
-        [ProducesResponseType(204)]
-        [ProducesResponseType(400)]
-        public IActionResult CreatePokemon([FromQuery] int ownerId, [FromQuery] int catId, [FromBody] PokemonDto pokemonCreate)
+        [ProducesResponseType(typeof(PokemonDto), StatusCodes.Status201Created)]
+        [ProducesResponseType(StatusCodes.Status400BadRequest)]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(StatusCodes.Status409Conflict)]
+        public async Task<IActionResult> CreatePokemon(
+            [FromQuery] int ownerId,
+            [FromQuery] int catId,
+            [FromBody] PokemonDto request,
+            CancellationToken cancellationToken)
         {
-            if (pokemonCreate == null)
-                return BadRequest(ModelState);
+            if (await _unitOfWork.Pokemon.GetByNameAsync(request.Name, cancellationToken) is not null)
+                return Problem(DomainErrors.Pokemon.DuplicateName(request.Name));
 
-            var pokemons = _pokemonRepository.GetPokemonTrimToUpper(pokemonCreate);
+            if (!await _unitOfWork.Owners.ExistsAsync(ownerId, cancellationToken))
+                return Problem(DomainErrors.Owner.NotFound(ownerId));
 
-            if (pokemons != null)
-            {
-                ModelState.AddModelError("", "Owner already exists");
-                return StatusCode(422, ModelState);
-            }
+            if (!await _unitOfWork.Categories.ExistsAsync(catId, cancellationToken))
+                return Problem(DomainErrors.Category.NotFound(catId));
 
-            if (!ModelState.IsValid)
-                return BadRequest(ModelState);
+            var pokemon = _mapper.Map<Pokemon>(request);
 
-            var pokemonMap = _mapper.Map<Pokemon>(pokemonCreate);
+            // The pokemon and its two join rows are staged together and committed by the one
+            // SaveChangesAsync below, so a failure cannot leave an ownerless pokemon behind.
+            await _unitOfWork.Pokemon.AddWithOwnerAndCategoryAsync(pokemon, ownerId, catId, cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-      
-            if (!_pokemonRepository.CreatePokemon(ownerId, catId, pokemonMap))
-            {
-                ModelState.AddModelError("", "Something went wrong while savin");
-                return StatusCode(500, ModelState);
-            }
+            var created = _mapper.Map<PokemonDto>(pokemon);
 
-            return Ok("Successfully created");
+            return CreatedAtAction(nameof(GetPokemon), new { pokeId = created.Id }, created);
         }
 
-        [HttpPut("{pokeId}")]
-        [ProducesResponseType(400)]
-        [ProducesResponseType(204)]
-        [ProducesResponseType(404)]
-        public IActionResult UpdatePokemon(int pokeId, 
-            [FromQuery] int ownerId, [FromQuery] int catId,
-            [FromBody] PokemonDto updatedPokemon)
+        [HttpPut("{pokeId:int}")]
+        [ProducesResponseType(StatusCodes.Status204NoContent)]
+        [ProducesResponseType(StatusCodes.Status400BadRequest)]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        public async Task<IActionResult> UpdatePokemon(
+            int pokeId,
+            [FromBody] PokemonDto request,
+            CancellationToken cancellationToken)
         {
-            if (updatedPokemon == null)
-                return BadRequest(ModelState);
+            if (pokeId != request.Id)
+                return Problem(DomainErrors.General.IdMismatch(nameof(pokeId)));
 
-            if (pokeId != updatedPokemon.Id)
-                return BadRequest(ModelState);
+            var pokemon = await _unitOfWork.Pokemon.GetByIdAsync(pokeId, cancellationToken);
 
-            if (!_pokemonRepository.PokemonExists(pokeId))
-                return NotFound();
+            if (pokemon is null)
+                return Problem(DomainErrors.Pokemon.NotFound(pokeId));
 
-            if (!ModelState.IsValid)
-                return BadRequest();
+            _mapper.Map(request, pokemon);
 
-            var pokemonMap = _mapper.Map<Pokemon>(updatedPokemon);
-
-            if (!_pokemonRepository.UpdatePokemon(ownerId, catId,pokemonMap))
-            {
-                ModelState.AddModelError("", "Something went wrong updating owner");
-                return StatusCode(500, ModelState);
-            }
+            _unitOfWork.Pokemon.Update(pokemon);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
 
             return NoContent();
         }
 
-        [HttpDelete("{pokeId}")]
-        [ProducesResponseType(400)]
-        [ProducesResponseType(204)]
-        [ProducesResponseType(404)]
-        public IActionResult DeletePokemon(int pokeId)
+        [HttpDelete("{pokeId:int}")]
+        [Authorize(Roles = AppRoles.Admin)]
+        [ProducesResponseType(StatusCodes.Status204NoContent)]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(StatusCodes.Status403Forbidden)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        public async Task<IActionResult> DeletePokemon(int pokeId, CancellationToken cancellationToken)
         {
-            if (!_pokemonRepository.PokemonExists(pokeId))
-            {
-                return NotFound();
-            }
+            var pokemon = await _unitOfWork.Pokemon.GetByIdAsync(pokeId, cancellationToken);
 
-            var reviewsToDelete = _reviewRepository.GetReviewsOfAPokemon(pokeId);
-            var pokemonToDelete = _pokemonRepository.GetPokemon(pokeId);
+            if (pokemon is null)
+                return Problem(DomainErrors.Pokemon.NotFound(pokeId));
 
-            if (!ModelState.IsValid)
-                return BadRequest(ModelState);
+            var reviews = await _unitOfWork.Reviews.GetByPokemonAsync(
+                pokeId, tracked: true, cancellationToken);
 
-            if (!_reviewRepository.DeleteReviews(reviewsToDelete.ToList()))
-            {
-                ModelState.AddModelError("", "Something went wrong when deleting reviews");
-            }
+            // Reviews and the pokemon go in one commit. The old code saved them separately,
+            // which could leave orphaned reviews if the second save failed.
+            _unitOfWork.Reviews.RemoveRange(reviews);
+            _unitOfWork.Pokemon.Remove(pokemon);
 
-            if (!_pokemonRepository.DeletePokemon(pokemonToDelete))
-            {
-                ModelState.AddModelError("", "Something went wrong deleting owner");
-            }
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
 
             return NoContent();
         }

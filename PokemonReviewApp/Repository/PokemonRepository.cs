@@ -1,97 +1,70 @@
-﻿using PokemonReviewApp.Data;
-using PokemonReviewApp.Dto;
+using Microsoft.EntityFrameworkCore;
+using PokemonReviewApp.Data;
 using PokemonReviewApp.Interfaces;
 using PokemonReviewApp.Models;
 
 namespace PokemonReviewApp.Repository
 {
-    public class PokemonRepository : IPokemonRepository
+    public class PokemonRepository : GenericRepository<Pokemon>, IPokemonRepository
     {
-        private readonly DataContext _context;
-
-        public PokemonRepository(DataContext context)
+        public PokemonRepository(DataContext context) : base(context)
         {
-            _context = context;
         }
 
-        public bool CreatePokemon(int ownerId, int categoryId, Pokemon pokemon)
+        public override async Task<IReadOnlyList<Pokemon>> GetAllAsync(
+            bool tracked = false,
+            CancellationToken cancellationToken = default) =>
+            await Query(tracked).OrderBy(p => p.Id).ToListAsync(cancellationToken);
+
+        public Task<Pokemon?> GetByNameAsync(string name, CancellationToken cancellationToken = default)
         {
-            var pokemonOwnerEntity = _context.Owners.Where(a => a.Id == ownerId).FirstOrDefault();
-            var category = _context.Categories.Where(a => a.Id == categoryId).FirstOrDefault();
+            var normalized = name.Trim().ToUpper();
 
-            var pokemonOwner = new PokemonOwner()
-            {
-                Owner = pokemonOwnerEntity,
-                Pokemon = pokemon,
-            };
-
-            _context.Add(pokemonOwner);
-
-            var pokemonCategory = new PokemonCategory()
-            {
-                Category = category,
-                Pokemon = pokemon,
-            };
-
-            _context.Add(pokemonCategory);
-
-            _context.Add(pokemon);
-
-            return Save();
+            return DbSet
+                .AsNoTracking()
+                .FirstOrDefaultAsync(p => p.Name.Trim().ToUpper() == normalized, cancellationToken);
         }
 
-        public bool DeletePokemon(Pokemon pokemon)
+        public async Task<decimal> GetRatingAsync(int pokemonId, CancellationToken cancellationToken = default)
         {
-            _context.Remove(pokemon);
-            return Save();
+            var ratings = Context.Reviews
+                .AsNoTracking()
+                .Where(r => r.Pokemon.Id == pokemonId)
+                .Select(r => r.Rating);
+
+            // Sum and count rather than AverageAsync: SQLite refuses to average a decimal,
+            // and averaging as a double would round the result before it ever became one.
+            // The reviews themselves still never leave the database.
+            var count = await ratings.CountAsync(cancellationToken);
+
+            if (count == 0)
+                return 0m;
+
+            var total = await ratings.SumAsync(cancellationToken);
+
+            // The decimal cast is what keeps a 5, 5, 2 spread at 4 rather than integer 4.
+            return (decimal)total / count;
         }
 
-        public Pokemon GetPokemon(int id)
+        public async Task AddWithOwnerAndCategoryAsync(
+            Pokemon pokemon,
+            int ownerId,
+            int categoryId,
+            CancellationToken cancellationToken = default)
         {
-            return _context.Pokemon.Where(p => p.Id == id).FirstOrDefault();
-        }
+            // Reference the owner and category by id rather than by loaded entity: EF fills the
+            // foreign keys once the pokemon gets its identity on save, and a bad id surfaces as
+            // a constraint violation the exception middleware turns into a 500 rather than a
+            // silent row with a null owner.
+            await DbSet.AddAsync(pokemon, cancellationToken);
 
-        public Pokemon GetPokemon(string name)
-        {
-            return _context.Pokemon.Where(p => p.Name == name).FirstOrDefault();
-        }
+            await Context.PokemonOwners.AddAsync(
+                new PokemonOwner { Owner = null!, OwnerId = ownerId, Pokemon = pokemon },
+                cancellationToken);
 
-        public decimal GetPokemonRating(int pokeId)
-        {
-            var review = _context.Reviews.Where(p => p.Pokemon.Id == pokeId);
-
-            if (review.Count() <= 0)
-                return 0;
-
-            return ((decimal)review.Sum(r => r.Rating) / review.Count());
-        }
-
-        public ICollection<Pokemon> GetPokemons()
-        {
-            return _context.Pokemon.OrderBy(p => p.Id).ToList();
-        }
-
-        public Pokemon GetPokemonTrimToUpper(PokemonDto pokemonCreate)
-        {
-            return GetPokemons().Where(c => c.Name.Trim().ToUpper() == pokemonCreate.Name.TrimEnd().ToUpper())
-                .FirstOrDefault();
-        }
-
-        public bool PokemonExists(int pokeId)
-        {
-            return _context.Pokemon.Any(p => p.Id == pokeId);
-        }
-
-        public bool Save()
-        {
-            var saved = _context.SaveChanges();
-            return saved > 0 ? true : false;
-        }
-
-        public bool UpdatePokemon(int ownerId, int categoryId, Pokemon pokemon)
-        {
-            _context.Update(pokemon);
-            return Save();
+            await Context.PokemonCategories.AddAsync(
+                new PokemonCategory { Category = null!, CategoryId = categoryId, Pokemon = pokemon },
+                cancellationToken);
         }
     }
 }

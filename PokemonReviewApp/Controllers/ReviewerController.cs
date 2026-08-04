@@ -1,149 +1,127 @@
-﻿using AutoMapper;
+using AutoMapper;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using PokemonReviewApp.Common;
 using PokemonReviewApp.Dto;
 using PokemonReviewApp.Interfaces;
 using PokemonReviewApp.Models;
 
 namespace PokemonReviewApp.Controllers
 {
-    [Route("api/[controller]")]
-    [ApiController]
-    public class ReviewerController : Controller
+    [Authorize]
+    public class ReviewerController : ApiControllerBase
     {
-        private readonly IReviewerRepository _reviewerRepository;
+        private readonly IUnitOfWork _unitOfWork;
         private readonly IMapper _mapper;
 
-        public ReviewerController(IReviewerRepository reviewerRepository, IMapper mapper)
+        public ReviewerController(IUnitOfWork unitOfWork, IMapper mapper)
         {
-            _reviewerRepository = reviewerRepository;
+            _unitOfWork = unitOfWork;
             _mapper = mapper;
         }
 
         [HttpGet]
-        [ProducesResponseType(200, Type = typeof(IEnumerable<Reviewer>))]
-        public IActionResult GetReviewers()
+        [AllowAnonymous]
+        [ProducesResponseType(typeof(IEnumerable<ReviewerDto>), StatusCodes.Status200OK)]
+        public async Task<IActionResult> GetReviewers(CancellationToken cancellationToken)
         {
-            var reviewers = _mapper.Map<List<ReviewerDto>>(_reviewerRepository.GetReviewers());
+            var reviewers = await _unitOfWork.Reviewers.GetAllAsync(cancellationToken: cancellationToken);
 
-            if (!ModelState.IsValid)
-                return BadRequest(ModelState);
-
-            return Ok(reviewers);
+            return Ok(_mapper.Map<List<ReviewerDto>>(reviewers));
         }
 
-        [HttpGet("{reviewerId}")]
-        [ProducesResponseType(200, Type = typeof(Reviewer))]
-        [ProducesResponseType(400)]
-        public IActionResult GetPokemon(int reviewerId)
+        [HttpGet("{reviewerId:int}")]
+        [AllowAnonymous]
+        [ProducesResponseType(typeof(ReviewerDto), StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        public async Task<IActionResult> GetReviewer(int reviewerId, CancellationToken cancellationToken)
         {
-            if (!_reviewerRepository.ReviewerExists(reviewerId))
-                return NotFound();
+            var result = Result
+                .Create(
+                    await _unitOfWork.Reviewers.GetWithReviewsAsync(reviewerId, cancellationToken),
+                    DomainErrors.Reviewer.NotFound(reviewerId))
+                .Map(_mapper.Map<ReviewerDto>);
 
-            var reviewer = _mapper.Map<ReviewerDto>(_reviewerRepository.GetReviewer(reviewerId));
-
-            if (!ModelState.IsValid)
-                return BadRequest(ModelState);
-
-            return Ok(reviewer);
+            return ToActionResult(result);
         }
 
-        [HttpGet("{reviewerId}/reviews")]
-        public IActionResult GetReviewsByAReviewer(int reviewerId)
+        [HttpGet("{reviewerId:int}/reviews")]
+        [AllowAnonymous]
+        [ProducesResponseType(typeof(IEnumerable<ReviewDto>), StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        public async Task<IActionResult> GetReviewsByAReviewer(int reviewerId, CancellationToken cancellationToken)
         {
-            if (!_reviewerRepository.ReviewerExists(reviewerId))
-                return NotFound();
+            if (!await _unitOfWork.Reviewers.ExistsAsync(reviewerId, cancellationToken))
+                return Problem(DomainErrors.Reviewer.NotFound(reviewerId));
 
-            var reviews = _mapper.Map<List<ReviewDto>>(
-                _reviewerRepository.GetReviewsByReviewer(reviewerId));
+            var reviews = await _unitOfWork.Reviewers.GetReviewsByReviewerAsync(reviewerId, cancellationToken: cancellationToken);
 
-            if (!ModelState.IsValid)
-                return BadRequest(ModelState);
-
-            return Ok(reviews);
+            return Ok(_mapper.Map<List<ReviewDto>>(reviews));
         }
 
         [HttpPost]
-        [ProducesResponseType(204)]
-        [ProducesResponseType(400)]
-        public IActionResult CreateReviewer([FromBody] ReviewerDto reviewerCreate)
+        [ProducesResponseType(typeof(ReviewerDto), StatusCodes.Status201Created)]
+        [ProducesResponseType(StatusCodes.Status400BadRequest)]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(StatusCodes.Status409Conflict)]
+        public async Task<IActionResult> CreateReviewer(
+            [FromBody] ReviewerDto request,
+            CancellationToken cancellationToken)
         {
-            if (reviewerCreate == null)
-                return BadRequest(ModelState);
+            if (await _unitOfWork.Reviewers.GetByLastNameAsync(request.LastName, cancellationToken) is not null)
+                return Problem(DomainErrors.Reviewer.DuplicateName(request.LastName));
 
-            var country = _reviewerRepository.GetReviewers()
-                .Where(c => c.LastName.Trim().ToUpper() == reviewerCreate.LastName.TrimEnd().ToUpper())
-                .FirstOrDefault();
+            var reviewer = _mapper.Map<Reviewer>(request);
 
-            if (country != null)
-            {
-                ModelState.AddModelError("", "Country already exists");
-                return StatusCode(422, ModelState);
-            }
+            await _unitOfWork.Reviewers.AddAsync(reviewer, cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-            if (!ModelState.IsValid)
-                return BadRequest(ModelState);
+            var created = _mapper.Map<ReviewerDto>(reviewer);
 
-            var reviewerMap = _mapper.Map<Reviewer>(reviewerCreate);
-
-            if (!_reviewerRepository.CreateReviewer(reviewerMap))
-            {
-                ModelState.AddModelError("", "Something went wrong while savin");
-                return StatusCode(500, ModelState);
-            }
-
-            return Ok("Successfully created");
+            return CreatedAtAction(nameof(GetReviewer), new { reviewerId = created.Id }, created);
         }
 
-        [HttpPut("{reviewerId}")]
-        [ProducesResponseType(400)]
-        [ProducesResponseType(204)]
-        [ProducesResponseType(404)]
-        public IActionResult UpdateReviewer(int reviewerId, [FromBody] ReviewerDto updatedReviewer)
+        [HttpPut("{reviewerId:int}")]
+        [ProducesResponseType(StatusCodes.Status204NoContent)]
+        [ProducesResponseType(StatusCodes.Status400BadRequest)]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        public async Task<IActionResult> UpdateReviewer(
+            int reviewerId,
+            [FromBody] ReviewerDto request,
+            CancellationToken cancellationToken)
         {
-            if (updatedReviewer == null)
-                return BadRequest(ModelState);
+            if (reviewerId != request.Id)
+                return Problem(DomainErrors.General.IdMismatch(nameof(reviewerId)));
 
-            if (reviewerId != updatedReviewer.Id)
-                return BadRequest(ModelState);
+            var reviewer = await _unitOfWork.Reviewers.GetByIdAsync(reviewerId, cancellationToken);
 
-            if (!_reviewerRepository.ReviewerExists(reviewerId))
-                return NotFound();
+            if (reviewer is null)
+                return Problem(DomainErrors.Reviewer.NotFound(reviewerId));
 
-            if (!ModelState.IsValid)
-                return BadRequest();
+            _mapper.Map(request, reviewer);
 
-            var reviewerMap = _mapper.Map<Reviewer>(updatedReviewer);
-
-            if (!_reviewerRepository.UpdateReviewer(reviewerMap))
-            {
-                ModelState.AddModelError("", "Something went wrong updating owner");
-                return StatusCode(500, ModelState);
-            }
+            _unitOfWork.Reviewers.Update(reviewer);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
 
             return NoContent();
         }
 
-
-        [HttpDelete("{reviewerId}")]
-        [ProducesResponseType(400)]
-        [ProducesResponseType(204)]
-        [ProducesResponseType(404)]
-        public IActionResult DeleteReviewer(int reviewerId)
+        [HttpDelete("{reviewerId:int}")]
+        [Authorize(Roles = AppRoles.Admin)]
+        [ProducesResponseType(StatusCodes.Status204NoContent)]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(StatusCodes.Status403Forbidden)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        public async Task<IActionResult> DeleteReviewer(int reviewerId, CancellationToken cancellationToken)
         {
-            if (!_reviewerRepository.ReviewerExists(reviewerId))
-            {
-                return NotFound();
-            }
+            var reviewer = await _unitOfWork.Reviewers.GetByIdAsync(reviewerId, cancellationToken);
 
-            var reviewerToDelete = _reviewerRepository.GetReviewer(reviewerId);
+            if (reviewer is null)
+                return Problem(DomainErrors.Reviewer.NotFound(reviewerId));
 
-            if (!ModelState.IsValid)
-                return BadRequest(ModelState);
-
-            if (!_reviewerRepository.DeleteReviewer(reviewerToDelete))
-            {
-                ModelState.AddModelError("", "Something went wrong deleting reviewer");
-            }
+            _unitOfWork.Reviewers.Remove(reviewer);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
 
             return NoContent();
         }
